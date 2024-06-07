@@ -5,6 +5,7 @@ import torch.nn as nn
 import timm
 from diffusers import StableDiffusionXLImg2ImgPipeline, StableDiffusionInpaintPipeline
 import random
+from torchvision import models
 import torchvision
 import matplotlib.pyplot as plt
 import os
@@ -34,25 +35,29 @@ def train(config):
 
     transform = transforms.ToTensor()
 
-    ref_image = load_image(config['image_path'])
+    ref_image = fetch_image_from_url(config['image_path'])
+
+    mask_image = Image.new("L", ref_image.size, 0)
+    draw = ImageDraw.Draw(mask_image)
+    width, height = ref_image.size
+    draw.rectangle([(width // 4, height // 4), (3 * width // 4, 3 * height // 4)], fill=255)
 
     for i in range(config['iter']):
         images = None
         for j in range(config['batch_size']):
             choose_list = config['good_catalog'] if j % 2 == 0 else config['defect_catalog']
             edited_image = \
-                pipe(prompt=random.choice(choose_list), image=ref_image).images[0]
+                pipe(prompt=random.choice(choose_list), image=ref_image,
+                     mask_image=mask_image).images[0]
             tensor_image = transform(edited_image).unsqueeze(0)
             images = torch.cat((images, tensor_image), dim=0) if images is not None else tensor_image
 
         images = images.to(config['device'])
-        label = torch.tensor([1 if j % 2 == 0 else 0 for j in range(config['batch_size'])]).to(config['device'])
+        label = torch.tensor([1 if j % 2 == 0 else 0 for j in range(config['batch_size'])]).to(config['device']).to(
+            torch.long)
 
-        # optimize
         optimizer.zero_grad()
         pred = model(images)
-        print(images.shape)
-        print(pred.shape)
         loss = criterion(pred, label)
         loss.backward()
         optimizer.step()
@@ -61,15 +66,32 @@ def train(config):
     return model
 
 
-def load_model(model_name, device, pretrained=True):
+def load_model(model_name, device, num_classes=2, pretrained=True):
+    # see: https://pytorch.org/tutorials/beginner/finetuning_torchvision_models_tutorial.html
     if model_name == 'resnet18':
-        model = timm.create_model('resnet18', pretrained)
+        model = models.resnet18(pretrained=pretrained)
+        model.fc = torch.nn.Linear(512, num_classes)
     elif model_name == 'resnet50':
-        model = timm.create_model('resnet50', pretrained)
-    elif model_name == 'resnet101':
-        model = timm.create_model('resnet101', pretrained)
-    elif model_name == 'mobilenet':
-        model = torchvision.models.mobilenet_v2(pretrained)
+        model = models.resnet50(pretrained=pretrained)
+        model.fc = torch.nn.Linear(2048, num_classes)
+    elif model_name == 'alexnet':
+        model = models.alexnet(pretrained=pretrained)
+        model.classifier[6] = torch.nn.Linear(4096, num_classes)
+    elif model_name == 'vgg13_bn':
+        model = models.vgg13_bn(pretrained=pretrained)
+        model.classifier[6] = torch.nn.Linear(4096, num_classes)
+    elif model_name == 'vgg16':
+        model = models.vgg16(pretrained=pretrained)
+        model.classifier[6] = torch.nn.Linear(4096, num_classes)
+    elif model_name == 'vgg11_bn':
+        model = models.vgg11_bn(pretrained=pretrained)
+        model.classifier[6] = torch.nn.Linear(4096, num_classes)
+    elif model_name == 'squeezenet':
+        model = models.squeezenet1_0(pretrained=pretrained)
+        model.features[0] = torch.nn.Conv2d(3, 96, kernel_size=(3, 3), stride=(2, 2))
+        model.classifier[1] = torch.nn.Conv2d(512, num_classes, kernel_size=(1, 1), stride=(1, 1))
+
+    # the following is for generative diffusion models
     elif model_name == 'sd_xl':
         model = StableDiffusionXLImg2ImgPipeline.from_pretrained(
             "stabilityai/stable-diffusion-xl-refiner-1.0", torch_dtype=torch.float16, variant="fp16",
@@ -84,14 +106,13 @@ def load_model(model_name, device, pretrained=True):
             "stabilityai/stable-diffusion-2-base",
             torch_dtype=torch.float16,
         )
-
     else:
         raise ValueError('Model not supported')
     model = model.to(device)
     return model
 
 
-def show_gen_image(config, display_or_save='display', save_path='./gen_images'):
+def show_gen_image(config, num_image = 1, display_or_save='display', save_path='./gen_images'):
     pipe = config['gen_model']
     ref_image = fetch_image_from_url(config['image_path'])
 
@@ -123,18 +144,19 @@ def show_gen_image(config, display_or_save='display', save_path='./gen_images'):
         plt.show()
 
     for i, prompt in enumerate(gen_list):
-        edited_image = pipe(prompt, image=ref_image, mask_image=mask_image,
-                            # num_inference_steps=50,
-                            # guidance_scale=7.5,
-                            # strength=0.8
-                            ).images[0]
-        plt.figure()
-        plt.imshow(edited_image)
-        plt.title(prompt)
-        if display_or_save == 'display':
-            plt.show()
-        else:
-            plt.savefig(os.path.join(save_path, 'image_' + str(i) + '.png'))
+        for j in range(num_image):
+            edited_image = pipe(prompt, image=ref_image, mask_image=mask_image,
+                                # num_inference_steps=50,
+                                # guidance_scale=7.5,
+                                # strength=0.8
+                                ).images[0]
+            plt.figure()
+            plt.imshow(edited_image)
+            plt.title(prompt)
+            if display_or_save == 'display':
+                plt.show()
+            else:
+                plt.savefig(os.path.join(save_path, 'image_' + str(j) + '_' + str(i) + '.png'))
     return None
 
 
@@ -150,7 +172,7 @@ def main():
             'A single strand of black human hair on the transparent glass',
             'a piece of dirt or dust on the transparent glass',
             'a clear large scratch on the transparent glass',
-            'a cat face on the sidewall of the glass vial', # for debugging purpose
+            'a cat face on the sidewall of the glass vial',  # for debugging purpose, or even add more severe 'outliers/defects'
         ],
         'good_catalog': [
             'a clean and clear transparent glass vial',
@@ -162,9 +184,9 @@ def main():
         'batch_size': 4
     }
 
-    show_gen_image(config, display_or_save='save', save_path='./gen_images')
+    # show_gen_image(config, num_image=2, display_or_save='save', save_path='./gen_images')
 
-    # config['model'] = train(config)
+    config['model'] = train(config)
 
 
 main()
