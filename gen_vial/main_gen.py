@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import os
 import torchvision.transforms as transforms
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw
 from io import BytesIO
 
 
@@ -51,6 +51,8 @@ def train(config):
         # optimize
         optimizer.zero_grad()
         pred = model(images)
+        print(images.shape)
+        print(pred.shape)
         loss = criterion(pred, label)
         loss.backward()
         optimizer.step()
@@ -77,6 +79,12 @@ def load_model(model_name, device, pretrained=True):
             "stabilityai/stable-diffusion-2-inpainting",
             torch_dtype=torch.float16,
         )
+    elif model_name == 'sd_base':
+        model = StableDiffusionImg2ImgPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-2-base",
+            torch_dtype=torch.float16,
+        )
+
     else:
         raise ValueError('Model not supported')
     model = model.to(device)
@@ -100,8 +108,26 @@ def show_gen_image(config, display_or_save='display', save_path='./gen_images'):
             for file in os.listdir(save_path):
                 os.remove(os.path.join(save_path, file))
 
+    # Create a mask image of the same size as the input image
+    mask_image = Image.new("L", ref_image.size, 0)
+    draw = ImageDraw.Draw(mask_image)
+    width, height = ref_image.size
+    draw.rectangle([(width // 4, height // 4), (3 * width // 4, 3 * height // 4)], fill=255)
+
+    if display_or_save == 'save':
+        mask_image.save(os.path.join(save_path, 'mask_image.png'))
+    else:
+        plt.figure()
+        plt.imshow(mask_image)
+        plt.title('mask image')
+        plt.show()
+
     for i, prompt in enumerate(gen_list):
-        edited_image = pipe(prompt, image=ref_image).images[0]
+        edited_image = pipe(prompt, image=ref_image, mask_image=mask_image,
+                            # num_inference_steps=50,
+                            # guidance_scale=7.5,
+                            # strength=0.8
+                            ).images[0]
         plt.figure()
         plt.imshow(edited_image)
         plt.title(prompt)
@@ -117,14 +143,18 @@ def main():
 
     config = {
         'device': device,
-        'gen_model': load_model('sd_xl', device),
+        'gen_model': load_model('sd_inpainting', device),
         'image_path': 'https://github.com/zhengqigao/reference_image/blob/main/gen_vial/ref_vial.jpg?raw=true',
         'defect_catalog': [
-            'a photo of a glass vial with a vertical crack on the sidewall of the glass vial',
-            'a photo of a glass vial with a contamination spot on the sidewall of the glass vial',
+            'a very large crack on the transparent glass',
+            'A single strand of black human hair on the transparent glass',
+            'a piece of dirt or dust on the transparent glass',
+            'a clear large scratch on the transparent glass',
+            'a cat face on the sidewall of the glass vial', # for debugging purpose
         ],
         'good_catalog': [
-            'a photo of a glass vial containing a white substance, possibly a powder or crystalline material'
+            'a clean and clear transparent glass vial',
+            'the color of vial cap is blue',
         ],
         'model': load_model('resnet18', device),
         'lr': 0.001,
